@@ -91,6 +91,7 @@ interface AddOptions {
   custom_categories?: Array<Record<string, string>>;
   enable_graph?: boolean;
   output_format?: string;
+  infer?: boolean;
 }
 
 interface SearchOptions {
@@ -287,6 +288,7 @@ class OSSProvider implements Mem0Provider {
     const addOpts: Record<string, unknown> = { userId: options.user_id };
     if (options.run_id) addOpts.runId = options.run_id;
     if (options.enable_graph != null) addOpts.enableGraph = options.enable_graph;
+    if (options.infer != null) addOpts.infer = options.infer;
     const result = await this.memory.add(messages, addOpts);
     return normalizeAddResult(result);
   }
@@ -316,6 +318,7 @@ class OSSProvider implements Mem0Provider {
     // OSS SDK uses camelCase: userId/runId, not user_id/run_id
     const getAllOpts: Record<string, unknown> = { userId: options.user_id };
     if (options.run_id) getAllOpts.runId = options.run_id;
+    getAllOpts.limit = 1000; // Override default 100
     const results = await this.memory.getAll(getAllOpts);
     if (Array.isArray(results)) return results.map(normalizeMemoryItem);
     if (results?.results && Array.isArray(results.results))
@@ -326,6 +329,15 @@ class OSSProvider implements Mem0Provider {
   async delete(memoryId: string): Promise<void> {
     await this.ensureMemory();
     await this.memory.delete(memoryId);
+  }
+
+  /** Close underlying resources (e.g. Neo4j driver). Call on plugin stop. */
+  async close(): Promise<void> {
+    try {
+      await this.memory?.graphMemory?.graph?.close?.();
+    } catch {
+      // ignore — best-effort cleanup
+    }
   }
 }
 
@@ -845,6 +857,9 @@ const memoryPlugin = {
               ];
             }
 
+            // Apply client-side score threshold filter
+            results = results.filter(r => (r.score ?? 1) >= cfg.searchThreshold);
+
             // Apply category filter if specified (client-side post-filter)
             if (category && results.length > 0) {
               const lowerCat = category.toLowerCase();
@@ -1027,6 +1042,10 @@ const memoryPlugin = {
             const addOpts: AddOptions = {
               user_id: resolvedUserId,
             };
+            // For OSS mode, disable LLM inference to store verbatim
+            if (cfg.mode !== "platform") {
+              addOpts.infer = false;
+            }
             // For platform mode, we still need custom instructions but
             // the "raw" aspect comes from how we frame the message
             if (cfg.mode === "platform") {
@@ -1693,18 +1712,22 @@ const memoryPlugin = {
             );
           }
 
+          // Apply client-side score threshold filter
+          const filteredLongTerm = longTermResults.filter(r => (r.score ?? 1) >= cfg.searchThreshold);
+          const filteredSession = sessionResults.filter(r => (r.score ?? 1) >= cfg.searchThreshold);
+
           // Deduplicate session results against long-term
-          const longTermIds = new Set(longTermResults.map((r) => r.id));
-          const uniqueSessionResults = sessionResults.filter(
+          const longTermIds = new Set(filteredLongTerm.map((r) => r.id));
+          const uniqueSessionResults = filteredSession.filter(
             (r) => !longTermIds.has(r.id),
           );
 
-          if (longTermResults.length === 0 && uniqueSessionResults.length === 0) return;
+          if (filteredLongTerm.length === 0 && uniqueSessionResults.length === 0) return;
 
           // Build context with clear labels
           let memoryContext = "";
-          if (longTermResults.length > 0) {
-            memoryContext += longTermResults
+          if (filteredLongTerm.length > 0) {
+            memoryContext += filteredLongTerm
               .map(
                 (r) =>
                   `- ${r.memory}${r.categories?.length ? ` [${r.categories.join(", ")}]` : ""}`,
@@ -1719,9 +1742,9 @@ const memoryPlugin = {
               .join("\n");
           }
 
-          const totalCount = longTermResults.length + uniqueSessionResults.length;
+          const totalCount = filteredLongTerm.length + uniqueSessionResults.length;
           api.logger.info(
-            `openclaw-mem0: injecting ${totalCount} memories into context (${longTermResults.length} long-term, ${uniqueSessionResults.length} session)`,
+            `openclaw-mem0: injecting ${totalCount} memories into context (${filteredLongTerm.length} long-term, ${uniqueSessionResults.length} session)`,
           );
 
           return {
@@ -1850,7 +1873,11 @@ const memoryPlugin = {
           `openclaw-mem0: initialized (mode: ${cfg.mode}, user: ${cfg.userId}, autoRecall: ${cfg.autoRecall}, autoCapture: ${cfg.autoCapture})`,
         );
       },
-      stop: () => {
+      stop: async () => {
+        // Close Neo4j driver / graph resources if present
+        if (provider && typeof (provider as any).close === "function") {
+          await (provider as any).close();
+        }
         api.logger.info("openclaw-mem0: stopped");
       },
     });

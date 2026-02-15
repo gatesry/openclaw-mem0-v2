@@ -51,6 +51,20 @@ if (src.includes(new2)) {
   console.warn('[patch-mem0-graph] Patch 2 (delete relations): target text not found — SDK may have changed');
 }
 
+// Patch 3: Disable Mem0 telemetry
+const old3 = 'var MEM0_TELEMETRY = true;';
+const new3 = 'var MEM0_TELEMETRY = false;';
+
+if (src.includes(new3)) {
+  console.log('[patch-mem0-graph] Patch 3 (disable telemetry): already applied');
+} else if (src.includes(old3)) {
+  src = src.replace(old3, new3);
+  patches++;
+  console.log('[patch-mem0-graph] Patch 3 (disable telemetry): applied');
+} else {
+  console.warn('[patch-mem0-graph] Patch 3 (disable telemetry): target text not found — SDK may have changed');
+}
+
 if (patches > 0) {
   fs.writeFileSync(TARGET, src, 'utf8');
   console.log(`[patch-mem0-graph] ${patches} patch(es) written to ${TARGET}`);
